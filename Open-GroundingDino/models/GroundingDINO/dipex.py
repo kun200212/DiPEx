@@ -422,7 +422,7 @@ class GroundingDINO(nn.Module):
         self.hidden_dim = hidden_dim = transformer.d_model
         self.num_feature_levels = num_feature_levels
         self.nheads = nheads
-        self.max_text_len = 256
+        self.max_text_len = max_text_len
         self.sub_sentence_present = sub_sentence_present
 
         # setting query dim
