@@ -317,6 +317,36 @@ class PromptTree(nn.Module):
         return torch.stack(prompts, dim=0)
 
 
+class VisualPromptPool(nn.Module):
+    """Learnable visual prompts injected into projected multi-scale features."""
+
+    def __init__(self, hidden_dim: int, num_feature_levels: int, tokens_per_level: int = 4):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_feature_levels = num_feature_levels
+        self.tokens_per_level = tokens_per_level
+        self.level_prompts = nn.ParameterList(
+            [
+                nn.Parameter(torch.zeros(tokens_per_level, hidden_dim, 1, 1))
+                for _ in range(num_feature_levels)
+            ]
+        )
+        for prompt in self.level_prompts:
+            nn.init.trunc_normal_(prompt, std=0.02)
+
+    def forward(self, srcs: List[Tensor], masks: List[Tensor]) -> List[Tensor]:
+        prompted_srcs = []
+        for level, (src, mask) in enumerate(zip(srcs, masks)):
+            if level >= len(self.level_prompts):
+                prompted_srcs.append(src)
+                continue
+            valid_mask = (~mask).unsqueeze(1).to(src.dtype)
+            prompt = self.level_prompts[level].mean(dim=0, keepdim=True)
+            prompt = prompt.to(src.dtype).expand(src.shape[0], -1, src.shape[-2], src.shape[-1])
+            prompted_srcs.append(src + prompt * valid_mask)
+        return prompted_srcs
+
+
 class GroundingDINO(nn.Module):
     """This is the Cross-Attention Detector module that performs object detection"""
 
@@ -344,6 +374,8 @@ class GroundingDINO(nn.Module):
         sub_sentence_present=True,
         max_text_len=256,
         init_prompt_num=1,
+        use_visual_prompt=False,
+        visual_prompt_tokens=4,
     ):
         """Initializes the model.
         Parameters:
@@ -471,6 +503,16 @@ class GroundingDINO(nn.Module):
         ### init prompt tree ###
         self.init_prompt_num = init_prompt_num
         self.prompt_tree = PromptTree(hidden_dim, self.init_prompt_num)
+        self.use_visual_prompt = use_visual_prompt
+        self.visual_prompt_pool = (
+            VisualPromptPool(
+                hidden_dim=hidden_dim,
+                num_feature_levels=num_feature_levels,
+                tokens_per_level=visual_prompt_tokens,
+            )
+            if use_visual_prompt
+            else None
+        )
 
         self._reset_parameters()
 
@@ -600,6 +642,8 @@ class GroundingDINO(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 poss.append(pos_l)
+        if self.visual_prompt_pool is not None:
+            srcs = self.visual_prompt_pool(srcs, masks)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
@@ -1093,7 +1137,9 @@ def build_dipex(args):
         text_encoder_type=args.text_encoder_type,
         sub_sentence_present=sub_sentence_present,
         max_text_len=args.max_text_len,
-        init_prompt_num=args.init_prompt_num
+        init_prompt_num=args.init_prompt_num,
+        use_visual_prompt=getattr(args, "use_visual_prompt", False),
+        visual_prompt_tokens=getattr(args, "visual_prompt_tokens", 4),
     )
 
 
@@ -1177,4 +1223,3 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
         # assert beg_pos is not None and end_pos is not None
         positive_map[j,beg_pos: end_pos + 1].fill_(1)
     return positive_map 
-
