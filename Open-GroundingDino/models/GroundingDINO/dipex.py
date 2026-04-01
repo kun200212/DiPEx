@@ -317,6 +317,39 @@ class PromptTree(nn.Module):
         return torch.stack(prompts, dim=0)
 
 
+class VisualPromptBank(nn.Module):
+    """
+    Lightweight visual prompts applied as additive per-level feature biases.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_feature_levels: int,
+        visual_prompt_scale: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.visual_prompt_scale = visual_prompt_scale
+        self.level_prompts = nn.ParameterList(
+            [
+                nn.Parameter(
+                    nn.init.normal_(
+                        torch.empty(hidden_dim, dtype=torch.float32),
+                        std=0.02,
+                    )
+                )
+                for _ in range(num_feature_levels)
+            ]
+        )
+
+    def apply(self, srcs: List[torch.Tensor]) -> List[torch.Tensor]:
+        prompted_srcs = []
+        for level, src in enumerate(srcs):
+            prompt = self.level_prompts[level].view(1, -1, 1, 1).to(src.dtype)
+            prompted_srcs.append(src + self.visual_prompt_scale * prompt)
+        return prompted_srcs
+
+
 class GroundingDINO(nn.Module):
     """This is the Cross-Attention Detector module that performs object detection"""
 
@@ -344,6 +377,8 @@ class GroundingDINO(nn.Module):
         sub_sentence_present=True,
         max_text_len=256,
         init_prompt_num=1,
+        use_visual_prompt=True,
+        visual_prompt_scale=1.0,
     ):
         """Initializes the model.
         Parameters:
@@ -471,6 +506,12 @@ class GroundingDINO(nn.Module):
         ### init prompt tree ###
         self.init_prompt_num = init_prompt_num
         self.prompt_tree = PromptTree(hidden_dim, self.init_prompt_num)
+        self.use_visual_prompt = use_visual_prompt
+        self.visual_prompt_bank = VisualPromptBank(
+            hidden_dim=hidden_dim,
+            num_feature_levels=num_feature_levels,
+            visual_prompt_scale=visual_prompt_scale,
+        )
 
         self._reset_parameters()
 
@@ -600,6 +641,9 @@ class GroundingDINO(nn.Module):
                 srcs.append(src)
                 masks.append(mask)
                 poss.append(pos_l)
+
+        if self.use_visual_prompt:
+            srcs = self.visual_prompt_bank.apply(srcs)
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
@@ -1093,7 +1137,9 @@ def build_dipex(args):
         text_encoder_type=args.text_encoder_type,
         sub_sentence_present=sub_sentence_present,
         max_text_len=args.max_text_len,
-        init_prompt_num=args.init_prompt_num
+        init_prompt_num=args.init_prompt_num,
+        use_visual_prompt=getattr(args, "use_visual_prompt", True),
+        visual_prompt_scale=getattr(args, "visual_prompt_scale", 1.0),
     )
 
 
@@ -1177,4 +1223,3 @@ def create_positive_map(tokenized, tokens_positive,cat_list,caption):
         # assert beg_pos is not None and end_pos is not None
         positive_map[j,beg_pos: end_pos + 1].fill_(1)
     return positive_map 
-

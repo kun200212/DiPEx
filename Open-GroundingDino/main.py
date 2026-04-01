@@ -172,6 +172,9 @@ def main(args):
         
     for param in model_without_ddp.prompt_tree.ca_prompts:
         param.requires_grad_(True)
+    if hasattr(model_without_ddp, "visual_prompt_bank"):
+        for param in model_without_ddp.visual_prompt_bank.parameters():
+            param.requires_grad_(True)
     
     logger.info("params after freezing:\n"+json.dumps({n: p.numel() for n, p in model.named_parameters() if p.requires_grad}, indent=2))
 
