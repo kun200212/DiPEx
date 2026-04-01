@@ -8,6 +8,7 @@ modelname = 'gdino_dipex'
 init_prompt_num = 1
 use_visual_prompt = True
 visual_prompt_tokens = 4
+use_visual_to_text_prompt = True
 backbone = 'swin_T_224_1k'
 position_embedding = 'sine'
 pe_temperatureH = 20

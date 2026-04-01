@@ -22,7 +22,7 @@ from typing import List
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import nn
+from torch import Tensor, nn
 from torchvision.ops.boxes import nms
 from transformers import AutoTokenizer, BertModel, BertTokenizer, RobertaModel, RobertaTokenizerFast
 
@@ -347,6 +347,36 @@ class VisualPromptPool(nn.Module):
         return prompted_srcs
 
 
+class VisualToTextPromptAdapter(nn.Module):
+    """Project pooled visual features to prompt-space deltas."""
+
+    def __init__(self, hidden_dim: int, num_feature_levels: int):
+        super().__init__()
+        self.level_weights = nn.Parameter(torch.zeros(num_feature_levels))
+        self.proj = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        nn.init.zeros_(self.proj[-1].weight)
+        nn.init.zeros_(self.proj[-1].bias)
+
+    def forward(self, srcs: List[Tensor], masks: List[Tensor], num_prompts: int) -> Tensor:
+        pooled_levels = []
+        for src, mask in zip(srcs, masks):
+            valid = (~mask).unsqueeze(1).to(src.dtype)
+            denom = valid.sum(dim=(-2, -1)).clamp(min=1.0)
+            pooled = (src * valid).sum(dim=(-2, -1)) / denom
+            pooled_levels.append(pooled)
+
+        stacked = torch.stack(pooled_levels, dim=1)  # [bs, levels, c]
+        weights = torch.softmax(self.level_weights[: stacked.shape[1]], dim=0)
+        fused = (stacked * weights.view(1, -1, 1)).sum(dim=1)  # [bs, c]
+        delta = self.proj(fused).unsqueeze(1).expand(-1, num_prompts, -1)
+        return delta
+
+
 class GroundingDINO(nn.Module):
     """This is the Cross-Attention Detector module that performs object detection"""
 
@@ -376,6 +406,7 @@ class GroundingDINO(nn.Module):
         init_prompt_num=1,
         use_visual_prompt=False,
         visual_prompt_tokens=4,
+        use_visual_to_text_prompt=False,
     ):
         """Initializes the model.
         Parameters:
@@ -391,7 +422,7 @@ class GroundingDINO(nn.Module):
         self.hidden_dim = hidden_dim = transformer.d_model
         self.num_feature_levels = num_feature_levels
         self.nheads = nheads
-        self.max_text_len = 256
+        self.max_text_len = max_text_len
         self.sub_sentence_present = sub_sentence_present
 
         # setting query dim
@@ -511,6 +542,11 @@ class GroundingDINO(nn.Module):
                 tokens_per_level=visual_prompt_tokens,
             )
             if use_visual_prompt
+            else None
+        )
+        self.visual_to_text_adapter = (
+            VisualToTextPromptAdapter(hidden_dim=hidden_dim, num_feature_levels=num_feature_levels)
+            if use_visual_to_text_prompt
             else None
         )
 
@@ -644,6 +680,13 @@ class GroundingDINO(nn.Module):
                 poss.append(pos_l)
         if self.visual_prompt_pool is not None:
             srcs = self.visual_prompt_pool(srcs, masks)
+
+        if self.training and self.visual_to_text_adapter is not None:
+            visual_prompt_delta = self.visual_to_text_adapter(srcs, masks, num_prompts)
+            encoded_text[:, 1 : 1 + num_prompts, :] = (
+                encoded_text[:, 1 : 1 + num_prompts, :] + visual_prompt_delta
+            )
+            text_dict["encoded_text"] = encoded_text
 
         input_query_bbox = input_query_label = attn_mask = dn_meta = None
         hs, reference, hs_enc, ref_enc, init_box_proposal = self.transformer(
@@ -1140,6 +1183,7 @@ def build_dipex(args):
         init_prompt_num=args.init_prompt_num,
         use_visual_prompt=getattr(args, "use_visual_prompt", False),
         visual_prompt_tokens=getattr(args, "visual_prompt_tokens", 4),
+        use_visual_to_text_prompt=getattr(args, "use_visual_to_text_prompt", False),
     )
 
 
